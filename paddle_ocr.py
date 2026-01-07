@@ -16,6 +16,7 @@
 import re
 import traceback
 import time
+import os
 from collections import Counter
 from datetime import datetime
 from queue import Queue, Empty
@@ -231,7 +232,27 @@ def capture_and_ocr() -> Optional[str]:
         
         if not results:
             print("未识别到任何有效结果")
-            # 保存图像
+            # 保存原始图像
+            try:
+                # 获取当前日期和时间
+                now = datetime.now()
+                date_str = now.strftime("%Y-%m-%d")
+                time_str = now.strftime("%H_%M_%S_%f")[:-3]  # 保留毫秒
+                
+                # 创建保存路径
+                save_dir = os.path.join("imgs", date_str)
+                os.makedirs(save_dir, exist_ok=True)
+                
+                # 构建文件名并保存图片
+                filename = f"{time_str}.jpg"
+                save_path = os.path.join(save_dir, filename)
+                
+                # 使用原始图像数据保存
+                cv2.imwrite(save_path, image_data)
+                
+                print(f"原始图片已保存至: {save_path}")
+            except Exception as e:
+                print(f"保存图片失败: {str(e)}")
             
             return None
 
