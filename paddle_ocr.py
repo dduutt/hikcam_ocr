@@ -39,10 +39,10 @@ from mqtt_client import new_client
 # ==============================================================================
 # MQTT配置
 MQTT_BROKER_HOST = "localhost"  # MQTT服务器地址
-MQTT_BROKER_PORT = 1883        # MQTT服务器端口
+MQTT_BROKER_PORT = 1883  # MQTT服务器端口
 MQTT_TOPIC_SUB = "mqtt_plc/scan"  # 订阅的主题，用于接收触发信号
 MQTT_TOPIC_PUB = "mqtt_plc/code"  # 发布的主题，用于发送识别结果
-
+MQTT_TOPIC_TEST_PUB = "mqtt_plc/test"  # 测试发布的主题
 # 消息有效时间
 TTL_SECONDS = 5  # 收到的MQTT消息超过此秒数将被视为过期
 
@@ -53,7 +53,7 @@ OCR_CONFIDENCE_THRESHOLD = 0.8
 
 # 相机配置
 CAMERA_TRIGGER_TIMEOUT_MS = 3000  # 相机取图超时时间
-CAMERA_MAX_FAILURES = 3            # 连续失败多少次后尝试重连
+CAMERA_MAX_FAILURES = 3  # 连续失败多少次后尝试重连
 
 # 识别码业务规则
 # True: 只返回以"LKTT"开头且长度为10的码
@@ -81,6 +81,7 @@ message_queue = Queue()
 # 4. 核心功能函数
 # ==============================================================================
 
+
 def fix_code(code: str) -> str:
     """
     清理和验证识别到的字符串。
@@ -96,8 +97,9 @@ def fix_code(code: str) -> str:
         if cleaned_code.startswith(CODE_PREFIX) and len(cleaned_code) == CODE_LENGTH:
             return cleaned_code
         return ""
-    
+
     return cleaned_code
+
 
 def initialize_camera() -> bool:
     """
@@ -109,7 +111,7 @@ def initialize_camera() -> bool:
     try:
         # 初始化SDK
         mvs.MvCamera.MV_CC_Initialize()
-        
+
         # 枚举设备
         dev_list = mvs.MV_CC_DEVICE_INFO_LIST()
         ret = mvs.MvCamera.MV_CC_EnumDevices(mvs.MV_GIGE_DEVICE, dev_list)
@@ -117,7 +119,9 @@ def initialize_camera() -> bool:
             raise Exception(f"枚举相机失败（错误码：{ret}），未找到可用GigE相机")
 
         # 创建句柄并打开设备
-        st_device_info = cast(dev_list.pDeviceInfo[0], POINTER(mvs.MV_CC_DEVICE_INFO)).contents
+        st_device_info = cast(
+            dev_list.pDeviceInfo[0], POINTER(mvs.MV_CC_DEVICE_INFO)
+        ).contents
         ret = cam.MV_CC_CreateHandle(st_device_info)
         if ret != mvs.MV_OK:
             raise Exception(f"创建相机句柄失败（错误码：{ret}）")
@@ -129,7 +133,7 @@ def initialize_camera() -> bool:
         # 配置为软件触发模式
         cam.MV_CC_SetEnumValue("TriggerMode", mvs.MV_TRIGGER_MODE_ON)
         cam.MV_CC_SetEnumValue("TriggerSource", mvs.MV_TRIGGER_SOURCE_SOFTWARE)
-        
+
         # 开始采集
         ret = cam.MV_CC_StartGrabbing()
         if ret != mvs.MV_OK:
@@ -150,6 +154,7 @@ def initialize_camera() -> bool:
         camera_initialized = False
         return False
 
+
 def reconnect_camera() -> bool:
     """
     执行完整的相机重连流程。
@@ -162,12 +167,12 @@ def reconnect_camera() -> bool:
         if cam.MV_CC_IsDeviceConnected():
             cam.MV_CC_StopGrabbing()
             cam.MV_CC_CloseDevice()
-        
+
         # 2. 销毁句柄
         if cam.handle:
             cam.MV_CC_DestroyHandle()
 
-        time.sleep(1) # 等待资源释放
+        time.sleep(1)  # 等待资源释放
 
         # 3. 重新初始化
         return initialize_camera()
@@ -176,6 +181,7 @@ def reconnect_camera() -> bool:
         print(f"!!! 相机重连过程中发生异常: {str(e)} !!!")
         camera_initialized = False
         return False
+
 
 def capture_and_ocr() -> Optional[str]:
     """
@@ -188,7 +194,7 @@ def capture_and_ocr() -> Optional[str]:
     try:
         # 软件触发
         cam.MV_CC_SetCommandValue("TriggerSoftware")
-        
+
         # 获取图像缓冲区
         frame_out = mvs.MV_FRAME_OUT()
         ret = cam.MV_CC_GetImageBuffer(frame_out, CAMERA_TRIGGER_TIMEOUT_MS)
@@ -213,7 +219,11 @@ def capture_and_ocr() -> Optional[str]:
         ).reshape(frame_info.nHeight, frame_info.nWidth)
 
         # 转为灰度图
-        gray_image = cv2.cvtColor(image_data, cv2.COLOR_BGR2GRAY) if len(image_data.shape) == 3 else image_data
+        gray_image = (
+            cv2.cvtColor(image_data, cv2.COLOR_BGR2GRAY)
+            if len(image_data.shape) == 3
+            else image_data
+        )
 
         # --- OCR识别 ---
         results = []
@@ -229,7 +239,7 @@ def capture_and_ocr() -> Optional[str]:
                         cleaned_text = fix_code(text)
                         if cleaned_text:
                             results.append(cleaned_text)
-        
+
         if not results:
             print("未识别到任何有效结果")
             # 保存原始图像
@@ -238,22 +248,22 @@ def capture_and_ocr() -> Optional[str]:
                 now = datetime.now()
                 date_str = now.strftime("%Y-%m-%d")
                 time_str = now.strftime("%H_%M_%S_%f")[:-3]  # 保留毫秒
-                
+
                 # 创建保存路径
                 save_dir = os.path.join("imgs", date_str)
                 os.makedirs(save_dir, exist_ok=True)
-                
+
                 # 构建文件名并保存图片
                 filename = f"{time_str}.jpg"
                 save_path = os.path.join(save_dir, filename)
-                
+
                 # 使用原始图像数据保存
                 cv2.imwrite(save_path, image_data)
-                
+
                 print(f"原始图片已保存至: {save_path}")
             except Exception as e:
                 print(f"保存图片失败: {str(e)}")
-            
+
             return None
 
         # 统计最高频结果
@@ -267,7 +277,7 @@ def capture_and_ocr() -> Optional[str]:
         return None
     finally:
         # 【关键修复】仅在成功获取图像后释放缓冲区
-        if frame_out is not None and 'ret' in locals() and ret == mvs.MV_OK:
+        if frame_out is not None and "ret" in locals() and ret == mvs.MV_OK:
             cam.MV_CC_FreeImageBuffer(frame_out)
         print("=== 拍照识别流程结束 ===")
 
@@ -280,14 +290,19 @@ def on_mqtt_message(client, userdata, msg):
         payload = msg.payload.decode("utf-8").strip()
         print(f"\n收到MQTT消息: 主题={msg.topic}, 内容={payload}")
 
+        # 测试消息直接加入队列
+        if payload == "test":
+            message_queue.put(payload)
+            return
+
         time_format = "%Y-%m-%d %H:%M:%S"
         target_time = datetime.strptime(payload, time_format)
-        
+
         # 检查消息是否过期
         if (datetime.now() - target_time).total_seconds() > TTL_SECONDS:
             print("消息已过期，忽略。")
             return
-            
+
         message_queue.put(target_time)
         print(f"消息已加入队列，当前队列长度: {message_queue.qsize()}")
 
@@ -328,12 +343,22 @@ if __name__ == "__main__":
             try:
                 # 从队列获取消息，超时1秒以便能响应KeyboardInterrupt
                 target_time = message_queue.get(timeout=1)
-                
+                # 测试消息直接跳过
+                if target_time == "test":
+                    test_result = capture_and_ocr()
+                    if test_result:
+                        mqtt_client.publish(MQTT_TOPIC_TEST_PUB, test_result)
+                        print(f"测试识别结果已发布到主题 {MQTT_TOPIC_TEST_PUB}")
+                        continue
+                    mqtt_client.publish(MQTT_TOPIC_TEST_PUB, "test_failed")
+                    print(f"测试识别失败，已发布到主题 {MQTT_TOPIC_TEST_PUB}")
+                    continue
+
                 # 再次检查消息是否过期（防止在队列中等待过久）
                 if (datetime.now() - target_time).total_seconds() > TTL_SECONDS:
                     print("队列中的消息已过期，忽略。")
                     continue
-                
+
                 # 执行识别任务
                 final_result = capture_and_ocr()
                 if final_result:
@@ -341,7 +366,7 @@ if __name__ == "__main__":
                     print(f"识别结果已发布到主题 {MQTT_TOPIC_PUB}")
 
             except Empty:
-                continue # 队列为空，继续循环
+                continue  # 队列为空，继续循环
             except Exception as e:
                 print(f"主循环发生未知异常: {str(e)}")
                 traceback.print_exc()
@@ -360,7 +385,7 @@ if __name__ == "__main__":
             cam.MV_CC_DestroyHandle()
             mvs.MvCamera.MV_CC_Finalize()
             print("相机资源已释放。")
-        
+
         # 停止MQTT客户端
         if mqtt_client:
             print("正在停止MQTT客户端...")
